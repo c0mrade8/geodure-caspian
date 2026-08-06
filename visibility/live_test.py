@@ -2,7 +2,7 @@
 Live Visibility Test — the opening of every report.
 Queries multiple AI models and checks if the business is mentioned.
 
-Real: Claude API (with web search tool)
+Real: GEMINI API (with web search tool)
 Real if key present: Groq (Llama 3 — tests training data, no live search)
 Real if key present: Perplexity API
 Mock (labeled): any platform where key is missing
@@ -10,8 +10,8 @@ Mock (labeled): any platform where key is missing
 
 import os
 import re
-import anthropic
-
+from google import genai
+from google.genai import types
 
 def build_queries(business_name: str, category: str, location: str) -> list[str]:
     """Build 3 queries that a real user would ask about this business's market."""
@@ -51,14 +51,17 @@ def extract_competitors(response_text: str, business_name: str) -> list[str]:
     return [c for c, _ in freq.most_common(5)]
 
 
-def test_claude(query: str, business_name: str, client: anthropic.Anthropic) -> dict:
-    """Test visibility in Claude with web search."""
+def test_gemini(query: str, business_name: str, client: genai.Client) -> dict:
+    """Test visibility in Gemini with web search."""
     try:
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=500,
-            tools=[{"type": "web_search_20250305", "name": "web_search"}],
-            messages=[{"role": "user", "content": query}]
+        config = types.GenerateContentConfig(
+            tools=[types.Tool(google_search=types.GoogleSearch())],
+            max_output_tokens=500,
+        )
+        response = client.models.generate_content(
+            model="gemini-3.5-flash",
+            contents=query,
+            config=config
         )
         # Collect all text from response
         full_text = " ".join(
@@ -67,7 +70,7 @@ def test_claude(query: str, business_name: str, client: anthropic.Anthropic) -> 
         )
         mentioned = check_mention(full_text, business_name)
         return {
-            "platform": "Claude",
+            "platform": "Gemini",
             "real": True,
             "mentioned": mentioned,
             "response_preview": full_text[:400],
@@ -75,7 +78,7 @@ def test_claude(query: str, business_name: str, client: anthropic.Anthropic) -> 
         }
     except Exception as e:
         return {
-            "platform": "Claude",
+            "platform": "Gemini",
             "real": True,
             "mentioned": False,
             "error": str(e),
@@ -109,7 +112,7 @@ def test_groq(query: str, business_name: str) -> dict:
                 "Content-Type": "application/json",
             },
             json={
-                "model": "llama3-70b-8192",
+                "model": "llama-3.3-70b-versatile",
                 "messages": [{"role": "user", "content": query}],
                 "max_tokens": 400,
             },
@@ -190,7 +193,7 @@ def test_perplexity(query: str, business_name: str) -> dict:
         }
 
 
-def run(business_name: str, category: str, location: str, client: anthropic.Anthropic) -> dict:
+def run(business_name: str, category: str, location: str, client: genai.Client) -> dict:
     """
     Run all visibility tests across platforms and queries.
     Returns structured results for the report opening section.
@@ -199,9 +202,9 @@ def run(business_name: str, category: str, location: str, client: anthropic.Anth
     results = []
 
     for query in queries:
-        claude_result = test_claude(query, business_name, client)
-        claude_result["query"] = query
-        results.append(claude_result)
+        gemini_result = test_gemini(query, business_name, client)
+        gemini_result["query"] = query
+        results.append(gemini_result)
 
         groq_result = test_groq(query, business_name)
         groq_result["query"] = query
