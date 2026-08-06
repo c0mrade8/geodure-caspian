@@ -12,6 +12,7 @@ import os
 import re
 from google import genai
 from google.genai import types
+from checks.llm_utils import generate
 
 def build_queries(business_name: str, category: str, location: str) -> list[str]:
     """Build 3 queries that a real user would ask about this business's market."""
@@ -21,6 +22,23 @@ def build_queries(business_name: str, category: str, location: str) -> list[str]
         f"recommend a {category} business{' in ' + location if location else ''}",
     ]
 
+def build_gemini_query(category: str, location: str) -> str:
+    location_text = f" in {location}" if location else ""
+
+    return f"""
+Answer the following separately.
+
+1. List the top {category} companies{location_text}.
+
+2. Who are the best {category} providers{location_text}?
+
+3. Recommend a {category} business{location_text}.
+
+Clearly label your answers as:
+Q1:
+Q2:
+Q3:
+"""
 
 def check_mention(response_text: str, business_name: str) -> bool:
     """Check if the business name appears in the response."""
@@ -31,50 +49,128 @@ def check_mention(response_text: str, business_name: str) -> bool:
     return name_lower in response_lower or any(p in response_lower for p in name_parts)
 
 
-def extract_competitors(response_text: str, business_name: str) -> list[str]:
-    """
-    Extract what entities ARE mentioned in the response.
-    Simple heuristic: capitalized noun phrases that aren't the business.
-    """
-    competitors = []
-    # Find capitalized runs of words (likely company/entity names)
-    matches = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', response_text)
-    seen = set()
-    biz_lower = business_name.lower()
-    for m in matches:
-        if m.lower() != biz_lower and len(m) > 3 and m not in seen:
-            seen.add(m)
-            competitors.append(m)
-    # Return top 5 most frequent
-    from collections import Counter
-    freq = Counter(competitors)
-    return [c for c, _ in freq.most_common(5)]
+import json
+import requests
 
 
-def test_gemini(query: str, business_name: str, client: genai.Client) -> dict:
+def extract_competitors(response_text: str, business_name: str, category:str, query:str) -> list[str]:
+    """
+    Uses Groq to extract ONLY competitor companies from an AI response.
+    """
+
+    groq_key = os.getenv("GROQ_API_KEY")
+    if not groq_key:
+        return []
+
+    prompt = f"""
+You are helping build a GEO Auditor.
+
+Business being audited:
+{business_name}
+
+Category:
+{category}
+
+User query:
+{query}
+
+Below is an AI-generated answer.
+
+Extract ONLY organizations that are being recommended
+instead of the audited business.
+
+Do NOT include:
+
+- countries
+- cities
+- products
+- research institutes
+- universities
+- generic organizations
+
+Only include businesses that a customer could realistically
+choose instead of the audited business.
+
+Return STRICT JSON ONLY.
+
+Example:
+
+{{
+    "competitors": [
+        "Tata Consultancy Services",
+        "Infosys",
+        "Wipro"
+    ]
+}}
+
+Answer:
+
+{response_text}
+"""
+
+    try:
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {groq_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "llama-3.3-70b-versatile",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                "temperature": 0,
+                "max_tokens": 150,
+                "response_format": {"type": "json_object"}
+            },
+            timeout=20,
+        )
+
+        content = resp.json()["choices"][0]["message"]["content"]
+
+        data = json.loads(content)
+
+        return data.get("competitors", [])[:5]
+
+    except Exception as e:
+        print(f"Competitor extraction failed: {e}")
+        return []
+
+
+def test_gemini(query: str, business_name: str, category:str, client: genai.Client) -> dict:
     """Test visibility in Gemini with web search."""
     try:
         config = types.GenerateContentConfig(
             tools=[types.Tool(google_search=types.GoogleSearch())],
             max_output_tokens=500,
         )
-        response = client.models.generate_content(
-            model="gemini-3.5-flash",
-            contents=query,
-            config=config
+        result = generate(
+            client,
+            prompt=query,
+            use_search=True,
+            max_tokens=500
         )
-        # Collect all text from response
-        full_text = " ".join(
-            block.text for block in response.content
-            if hasattr(block, "text")
-        )
+
+        if not result["available"]:
+            return {
+                "platform": "Gemini",
+                "real": True,
+                "mentioned": False,
+                "error": result["error"],
+                "competitors": [],
+            }
+        full_text = result["text"]
         mentioned = check_mention(full_text, business_name)
         return {
             "platform": "Gemini",
             "real": True,
             "mentioned": mentioned,
             "response_preview": full_text[:400],
-            "competitors": extract_competitors(full_text, business_name) if not mentioned else [],
+            "competitors": extract_competitors(full_text, business_name, category, query) if not mentioned else [],
         }
     except Exception as e:
         return {
@@ -86,7 +182,7 @@ def test_gemini(query: str, business_name: str, client: genai.Client) -> dict:
         }
 
 
-def test_groq(query: str, business_name: str) -> dict:
+def test_groq(query: str, business_name: str, category:str) -> dict:
     """
     Test Groq (Llama 3) — no web search.
     This tests training data presence, not live search.
@@ -127,7 +223,7 @@ def test_groq(query: str, business_name: str) -> dict:
             "mentioned": mentioned,
             "response_preview": text[:400],
             "note": "No web search — tests if business appears in model training data.",
-            "competitors": extract_competitors(text, business_name) if not mentioned else [],
+            "competitors": extract_competitors(text, business_name, category, query) if not mentioned else [],
         }
     except Exception as e:
         return {
@@ -140,7 +236,7 @@ def test_groq(query: str, business_name: str) -> dict:
         }
 
 
-def test_perplexity(query: str, business_name: str) -> dict:
+def test_perplexity(query: str, business_name: str, category:str) -> dict:
     """
     Test Perplexity — live web search.
     Zhang Kai et al. show Perplexity cites the broadest source pool (16.35 avg).
@@ -153,7 +249,11 @@ def test_perplexity(query: str, business_name: str) -> dict:
             "real": False,
             "mock": True,
             "mentioned": False,
-            "note": "MOCK — no PERPLEXITY_API_KEY set. Add key to .env to enable real test.",
+            "note": (
+                "MOCK — Perplexity API unavailable "
+                "(missing API key or credits). "
+                "This model is excluded from visibility scoring."
+            ),
             "competitors": [],
         }
 
@@ -180,7 +280,7 @@ def test_perplexity(query: str, business_name: str) -> dict:
             "mock": False,
             "mentioned": mentioned,
             "response_preview": text[:400],
-            "competitors": extract_competitors(text, business_name) if not mentioned else [],
+            "competitors": extract_competitors(text, business_name, category, query) if not mentioned else [],
         }
     except Exception as e:
         return {
@@ -201,29 +301,68 @@ def run(business_name: str, category: str, location: str, client: genai.Client) 
     queries = build_queries(business_name, category, location)
     results = []
 
-    for query in queries:
-        gemini_result = test_gemini(query, business_name, client)
-        gemini_result["query"] = query
-        results.append(gemini_result)
+    # ---------- Gemini (ONE CALL) ----------
+    gemini_query = build_gemini_query(category, location)
 
-        groq_result = test_groq(query, business_name)
+    gemini_result = test_gemini(
+        gemini_query,
+        business_name,
+        category,
+        client
+    )
+
+    gemini_result["query"] = "Combined (Top Companies + Best Providers + Recommendation)"
+    results.append(gemini_result)
+
+    # ---------- Groq + Perplexity ----------
+    for query in queries:
+
+        groq_result = test_groq(
+            query,
+            business_name,
+            category
+        )
         groq_result["query"] = query
         results.append(groq_result)
 
-        perp_result = test_perplexity(query, business_name)
+        perp_result = test_perplexity(
+            query,
+            business_name,
+            category
+        )
         perp_result["query"] = query
         results.append(perp_result)
+    # total_tests = len(results)
+    # mentions = sum(1 for r in results if r.get("mentioned"))
+    # visibility_pct = round((mentions / total_tests) * 100) if total_tests > 0 else 0
+    # Only count REAL tests
+    real_results = [r for r in results if r.get("real") and not r.get("mock", False)]
 
-    total_tests = len(results)
-    mentions = sum(1 for r in results if r.get("mentioned"))
-    visibility_pct = round((mentions / total_tests) * 100) if total_tests > 0 else 0
+    total_tests = len(real_results)
+
+    mentions = sum(
+        1
+        for r in real_results
+        if r.get("mentioned")
+    )
+
+    visibility_pct = (
+        round((mentions / total_tests) * 100)
+        if total_tests > 0
+        else 0
+    )
 
     # Collect all competitors mentioned across responses
     all_competitors = []
     for r in results:
         all_competitors.extend(r.get("competitors", []))
     from collections import Counter
-    top_competitors = [c for c, _ in Counter(all_competitors).most_common(3)]
+    top_competitors = [
+    {
+        "name": c,
+        "mentions": freq
+    }
+    for c, freq in Counter(all_competitors).most_common(3)]
 
     # Per-platform summary
     platforms = {}

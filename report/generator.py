@@ -120,14 +120,48 @@ TEMPLATE = """<!DOCTYPE html>
   .platform-chip .not-cited { color: #f87171; }
   .platform-chip .mock { color: #9ca3af; font-style: italic; }
 
-  .competitors-found {
-    margin-top: 20px;
-    padding-top: 16px;
-    border-top: 1px solid rgba(255,255,255,0.1);
-    font-size: 13px;
-    color: #9ca3af;
+  .competitors-hook {
+    background: rgba(248,113,113,0.12);
+    border: 1px solid rgba(248,113,113,0.35);
+    border-radius: 4px;
+    padding: 16px 20px;
+    margin: 20px 0 24px 0;
+    font-size: 14px;
+    color: #fecaca;
   }
-  .competitors-found strong { color: #f87171; }
+  .competitors-hook .hook-label {
+    font-family: 'Courier New', monospace;
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: #f87171;
+    margin-bottom: 6px;
+  }
+  .competitors-hook strong { color: #fff; }
+
+  .unavailable-note {
+    background: #f9fafb;
+    border: 1px dashed var(--border);
+    border-radius: 4px;
+    padding: 12px 16px;
+    font-size: 12.5px;
+    color: var(--muted);
+    margin-top: 10px;
+  }
+  .unavailable-note strong { color: var(--ink); }
+
+  .impact-tag {
+    display: inline-block;
+    font-family: 'Courier New', monospace;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 20px;
+    background: var(--green-bg);
+    color: var(--green);
+    margin-top: 6px;
+    margin-right: 6px;
+  }
+  .impact-tag.low-confidence { background: var(--amber-bg); color: var(--amber); }
 
   /* ── Section headings ── */
   .section {
@@ -373,12 +407,21 @@ TEMPLATE = """<!DOCTYPE html>
     <div class="visibility-number">{{ visibility_pct }}%</div>
     <div class="visibility-label">AI visibility across {{ total_tests }} queries and models</div>
 
+    {% if top_competitors %}
+    <div class="competitors-hook">
+      <div class="hook-label">Cited instead of {{ business_name }}</div>
+      When AI engines were asked about {{ category }}, they named <strong>{{ top_competitors | join(", ") }}</strong> — not you.
+    </div>
+    {% endif %}
+
     <div class="platform-grid">
       {% for name, data in platforms.items() %}
       <div class="platform-chip">
         <div class="name">{{ name }}</div>
         {% if data.mock %}
           <div class="status mock">Not tested (no API key)</div>
+        {% elif data.unavailable %}
+          <div class="status mock">Unable to test — {{ data.error_reason or "endpoint unavailable" }}</div>
         {% elif data.mentioned > 0 %}
           <div class="status cited">✓ Cited in {{ data.mentioned }}/{{ data.total }} queries</div>
         {% else %}
@@ -387,12 +430,6 @@ TEMPLATE = """<!DOCTYPE html>
       </div>
       {% endfor %}
     </div>
-
-    {% if top_competitors %}
-    <div class="competitors-found">
-      AI cited instead of you: <strong>{{ top_competitors | join(", ") }}</strong>
-    </div>
-    {% endif %}
   </div>
 
   <!-- Score Summary -->
@@ -405,13 +442,13 @@ TEMPLATE = """<!DOCTYPE html>
       {% set c2 = ai_authority %}
       {% set c3 = answer_readiness %}
 
-      {% for check, weight in [
-          (c1, "20% of score"),
-          (c2, "35% of score"),
-          (c3, "45% of score")
+      {% for check, label, weight in [
+          (c1, c1.check, "20% of score"),
+          (c2, "Entity Authority", "35% of score"),
+          (c3, c3.check, "45% of score")
       ] %}
       <div class="score-card">
-        <div class="check-name">{{ check.check }}</div>
+        <div class="check-name">{{ label }}</div>
         {% set pct = (check.score / check.max * 100) | int %}
         <div class="check-score
           {% if pct >= 70 %}score-high
@@ -433,7 +470,12 @@ TEMPLATE = """<!DOCTYPE html>
 
     <!-- Entity Salience: the non-obvious insight -->
     {% set salience = ai_authority.details.entity_salience %}
-    {% if salience and salience.salience_match in ['low', 'none', 'medium'] %}
+    {% if salience and salience.error %}
+    <div class="unavailable-note">
+      <strong>Entity association signal unavailable this run.</strong>
+      Reason: {{ salience.error }}. This check could not run — it is not being counted as a negative finding, and does not affect the score above.
+    </div>
+    {% elif salience and salience.salience_match in ['low', 'none', 'medium'] %}
     <div class="salience-box">
       <h3>The real problem: AI associates you with the wrong topic</h3>
       <p style="font-size:14px; margin-bottom:12px;">
@@ -529,6 +571,12 @@ TEMPLATE = """<!DOCTYPE html>
           {% if fix.effort %}
           <div class="fix-effort">Time required: {{ fix.effort }}</div>
           {% endif %}
+          {% if fix.impact_points %}
+          <span class="impact-tag {% if fix.confidence == 'low' %}low-confidence{% endif %}">
+            Expected impact: +{{ fix.impact_points }} pts
+            {% if fix.confidence %}· {{ fix.confidence | capitalize }} confidence{% endif %}
+          </span>
+          {% endif %}
         </div>
       </div>
       {% if fix.copy_paste %}
@@ -543,10 +591,14 @@ TEMPLATE = """<!DOCTYPE html>
   <div class="data-note">
     <strong>Methodology note:</strong>
     Crawlability checks are deterministic HTTP fetches.
-    AI Authority and Answer Readiness use Claude (claude-sonnet-4-6) with web search for analysis.
-    Live visibility tests run real queries across AI platforms — any mocked results are labeled.
+    Entity Authority and Answer Readiness use {{ analysis_engine or "Gemini, with web search grounding" }} for analysis.
+    Live visibility tests run real queries across AI platforms — any mocked or unavailable results are labeled as such, never presented as a negative finding.
     Research basis: Zhang Kai, He Xinyue & Yao Jingang (2026), "From Citation Selection to Citation Absorption"
     (602 prompts, 21,143 citations across ChatGPT, Google AIO, Perplexity).
+    {% if unavailable_count %}
+    <br><br><strong>Run completeness:</strong> {{ unavailable_count }} of {{ total_checks }} sub-checks could not be completed this run
+    (rate limits or endpoint errors) and were excluded from scoring rather than counted as failures.
+    {% endif %}
   </div>
 
   <div class="report-footer">
@@ -558,6 +610,34 @@ TEMPLATE = """<!DOCTYPE html>
 </html>"""
 
 
+# Stopgap filter until competitor extraction is fixed at the source (LLM-based
+# extraction instead of regex). This is a safety net, not the real fix — see README.
+_COMPETITOR_STOPWORDS = {
+    "here", "india", "today", "this", "that", "these", "those", "instead",
+    "company", "companies", "ignore", "they", "them", "unlike", "other",
+    "others", "the", "and", "with", "for", "from", "using", "including",
+    "such", "some", "many", "our", "your", "their",
+}
+
+
+def _clean_competitors(names: list) -> list:
+    cleaned = []
+    seen = set()
+    for item in names or []:
+        if isinstance(item, dict):
+            name = item["name"]
+        else:
+            name = item
+        key = name.strip().lower()
+        if not key or key in _COMPETITOR_STOPWORDS:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(name.strip())
+    return cleaned
+
+
 def generate(results: dict, output_path: str) -> str:
     """Render the HTML report from audit results."""
     template = Template(TEMPLATE)
@@ -565,19 +645,33 @@ def generate(results: dict, output_path: str) -> str:
     visibility = results["visibility"]
     platforms = visibility.get("platforms", {})
 
+    # Run-completeness: count sub-checks across ai_authority/answer_readiness
+    # that errored out, so the report can say so plainly instead of letting
+    # a 0-score stand in for "we couldn't measure this."
+    unavailable_count = 0
+    total_checks = 0
+    for section in (results["ai_authority"], results["answer_readiness"]):
+        for sub in section.get("details", {}).values():
+            total_checks += 1
+            if isinstance(sub, dict) and sub.get("error"):
+                unavailable_count += 1
+
     html = template.render(
         business_name=results["business_name"],
         url=results["url"],
         date=datetime.now().strftime("%d %B %Y"),
         visibility_pct=visibility["visibility_pct"],
         total_tests=visibility["total_tests"],
-        top_competitors=visibility.get("top_competitors", []),
+        top_competitors=_clean_competitors(visibility.get("top_competitors", [])),
         platforms=platforms,
         category=results["category"],
         crawlability=results["crawlability"],
         ai_authority=results["ai_authority"],
         answer_readiness=results["answer_readiness"],
         geo_score=results["geo_score"],
+        analysis_engine=results.get("analysis_engine"),
+        unavailable_count=unavailable_count,
+        total_checks=total_checks,
     )
 
     with open(output_path, "w", encoding="utf-8") as f:

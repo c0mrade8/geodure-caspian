@@ -1,10 +1,6 @@
 """
 GEO Auditor — Main Entry Point
 Usage: python main.py <url> <business_name> <category> [location]
-
-Example:
-  python main.py https://qpiai.tech "QPiAI" "quantum computing" "India"
-  python main.py https://notion.so "Notion" "productivity software" "San Francisco"
 """
 
 import sys

@@ -11,7 +11,7 @@ from bs4 import BeautifulSoup
 
 AI_BOTS = {
     "GPTBot":        {"points": 30, "platform": "ChatGPT"},
-    "ClaudeBot":     {"points": 20, "platform": "Claude"},
+    "GeminiBot":     {"points": 20, "platform": "Gemini"},
     "PerplexityBot": {"points": 20, "platform": "Perplexity"},
 }
 
