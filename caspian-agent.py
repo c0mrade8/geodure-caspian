@@ -56,6 +56,33 @@ URL_RE = re.compile(r"https?://\S+")
 # person" works the same regardless of which channel they wrote in on.
 _awaiting_referral_answer: dict[str, bool] = {}
 
+import requests
+
+def _send_telegram_pdf_direct(chat_id: str | int, pdf_path: str, caption: str = "Full GEO Audit Report"):
+    """Directly delivers the PDF to Telegram via official Bot API (bypassing gateway payload limits)."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token or not chat_id:
+        print("[telegram_fallback] Missing TELEGRAM_BOT_TOKEN or chat_id.")
+        return False
+    try:
+        url = f"https://api.telegram.org/bot{token}/sendDocument"
+        with open(pdf_path, "rb") as f:
+            res = requests.post(
+                url,
+                data={"chat_id": chat_id, "caption": caption},
+                files={"document": (os.path.basename(pdf_path), f, "application/pdf")},
+                timeout=30,
+            )
+        data = res.json()
+        if data.get("ok"):
+            print(f"[telegram_fallback] Successfully delivered PDF to Telegram chat {chat_id}")
+            return True
+        else:
+            print(f"[telegram_fallback] Telegram API error: {data}")
+            return False
+    except Exception as e:
+        print(f"[telegram_fallback] Failed to send PDF directly: {e}")
+        return False
 
 def _html_to_pdf(html_path: str, pdf_path: str):
     """Render the report to PDF with real Chromium (via Playwright) --
@@ -155,25 +182,33 @@ def _run_and_reply(message: Message, url: str, category: str, location: str):
         if fixes:
             summary += "\n\nTop fixes:\n" + "\n".join(f"- {f['title']}" for f in fixes)
 
-        if pdf_attached and os.path.exists(pdf_path):
-            with open(pdf_path, "rb") as f:
-                pdf_bytes = f.read()
-            import base64
-            encoded_data = base64.b64encode(pdf_bytes).decode("ascii")
-            print(f"[debug] Encoded PDF base64 length: {len(encoded_data)} chars")
+        print("[debug] Sending text summary...")
+        message.reply(summary)
+        print("[debug] Text summary dispatched.")
 
-            media = [{
-                "data": encoded_data,
-                "mime_type": "application/pdf",
-                "name": f"{safe}-geo-audit.pdf",
-            }]
-            summary += "\n\nFull report attached as a PDF."
-            print("[debug] Calling message.reply with media attachment...")
-            message.reply(summary, media=media)
-            print("[debug] message.reply completed successfully.")
-        else:
-            print("[debug] Skipping PDF attachment: pdf_attached is False or file missing.")
-            message.reply(summary)
+        # 2. Deliver the PDF
+        if pdf_attached and os.path.exists(pdf_path):
+            # If on Telegram, send directly to avoid base64 payload size limits
+            if getattr(message, "channel", None) == "telegram":
+                sender = message.sender or {}
+                # In Caspian SDK, sender address or id holds the telegram user/chat ID
+                chat_id = sender.get("address") or sender.get("id")
+                print(f"[debug] Dispatching PDF directly to Telegram chat ID: {chat_id}")
+                _send_telegram_pdf_direct(chat_id, pdf_path, caption=f"{business_name} - GEO Audit Report")
+            else:
+                # Email or other native Caspian channels: use standard media attachment
+                try:
+                    with open(pdf_path, "rb") as f:
+                        pdf_bytes = f.read()
+                    import base64
+                    media = [{
+                        "data": base64.b64encode(pdf_bytes).decode("ascii"),
+                        "mime_type": "application/pdf",
+                        "name": f"{safe}-geo-audit.pdf",
+                    }]
+                    message.reply("📎 Attached full PDF report:", media=media)
+                except Exception as media_err:
+                    print(f"[debug] Caspian media reply failed: {media_err}")
     except Exception as exc:
         message.reply(
             f"Couldn't finish that audit ({exc}). Try a plain https:// URL, "
