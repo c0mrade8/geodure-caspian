@@ -55,7 +55,7 @@ The report saves as a standalone HTML file in the project directory. Open it in 
 | `GEMINI_API_KEY`     | **Required**         | Yes — [aistudio.google.com](https://aistudio.google.com) | Live visibility test (Gemini) + all LLM-based checks (Entity Authority, Answer Readiness) |
 | `GROQ_API_KEY`       | Strongly recommended | Yes — [console.groq.com](https://console.groq.com)       | Training data visibility test + competitor name extraction                                |
 | `PERPLEXITY_API_KEY` | Optional             | No (paid)                                                | Additional live search visibility test                                                    |
-| `COMM_API_KEY` / `COMM_BASE_URL` | Required for GEO Pulse only | Yes — via `comm init` | Caspian channel gateway (email + Telegram) |
+| `CASPIAN_API_KEY` / `CASPIAN_BASE_URL` | Required for GEO Pulse only | Yes — via `caspian init` | Caspian channel gateway (email + Telegram) |
 | `TELEGRAM_BOT_TOKEN` | Optional, GEO Pulse only | Yes — via [@BotFather](https://t.me/BotFather) | Enables the Telegram channel; without it GEO Pulse still runs on email |
 
 If `GROQ_API_KEY` is missing, the Llama 3 visibility test and competitor extraction are skipped and labeled as unavailable in the report. If `PERPLEXITY_API_KEY` is missing, that test is skipped and labeled as a mock.
@@ -82,7 +82,7 @@ If `GROQ_API_KEY` is missing, the Llama 3 visibility test and competitor extract
 pip install -r requirements.txt
 playwright install chromium        # one-time, needed for HTML → PDF rendering
 
-comm init                          # writes COMM_API_KEY / COMM_BASE_URL to .env
+caspian init                          # writes CASPIAN_API_KEY / CASPIAN_BASE_URL to .env
 echo "TELEGRAM_BOT_TOKEN=..." >> .env   # optional, from @BotFather — omit to run email-only
 
 python caspian-agent.py
