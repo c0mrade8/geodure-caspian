@@ -1,4 +1,4 @@
-# GEO Auditor
+# GEO Auditor + GEO Pulse (Caspian agent)
 
 **Why AI search engines ignore your business — and exactly what to fix.**
 
@@ -6,15 +6,21 @@ Most businesses rank well on Google and are completely invisible inside AI answe
 
 > Existing GEO tools audit websites. This tool audits **why AI chooses (or doesn't choose) your business** when answering real user questions. Those are different problems. The first produces a technical checklist. The second produces a moment of recognition.
 
+The project ships two ways to run it:
+
+- **CLI** (`main.py`) — one-shot audit from a terminal, produces an HTML report.
+- **GEO Pulse** (`caspian-agent.py`) — the same audit pipeline wrapped as a [Caspian](https://caspian.dev) agent, reachable by email and Telegram, which also collects real-world "did an AI send you here?" referral data. See [Caspian integration](#caspian-integration-geo-pulse) below.
+
 ---
 
 ## What it does
 
-Enter a business URL. Get back:
+Enter a business URL — by CLI or by messaging GEO Pulse. Get back:
 
 1. **A live visibility score** — how many AI engines actually mention you right now, across real queries
 2. **Why you're invisible** — which of three root causes is failing, with evidence for each finding
 3. **Copy-pasteable fixes** — not advice, actual `robots.txt` blocks, JSON-LD schema markup, and written sentences to paste immediately
+4. **(Via GEO Pulse)** a real-world AI-referral log, gathered by asking every non-audit message one soft follow-up question — ground truth that a synthetic test-query tool structurally cannot produce on its own
 
 ---
 
@@ -49,8 +55,47 @@ The report saves as a standalone HTML file in the project directory. Open it in 
 | `GEMINI_API_KEY`     | **Required**         | Yes — [aistudio.google.com](https://aistudio.google.com) | Live visibility test (Gemini) + all LLM-based checks (Entity Authority, Answer Readiness) |
 | `GROQ_API_KEY`       | Strongly recommended | Yes — [console.groq.com](https://console.groq.com)       | Training data visibility test + competitor name extraction                                |
 | `PERPLEXITY_API_KEY` | Optional             | No (paid)                                                | Additional live search visibility test                                                    |
+| `COMM_API_KEY` / `COMM_BASE_URL` | Required for GEO Pulse only | Yes — via `comm init` | Caspian channel gateway (email + Telegram) |
+| `TELEGRAM_BOT_TOKEN` | Optional, GEO Pulse only | Yes — via [@BotFather](https://t.me/BotFather) | Enables the Telegram channel; without it GEO Pulse still runs on email |
 
 If `GROQ_API_KEY` is missing, the Llama 3 visibility test and competitor extraction are skipped and labeled as unavailable in the report. If `PERPLEXITY_API_KEY` is missing, that test is skipped and labeled as a mock.
+
+---
+
+## Caspian integration (GEO Pulse)
+
+`caspian-agent.py` wraps the existing audit pipeline (`main.run_audit`) as a single Caspian agent — one identity, one message handler, live on two channels (email + Telegram) at once. It does two jobs:
+
+1. **On-demand audits over chat.** Message it something like:
+
+   ```
+   audit https://acme.com as fintech software in Bangalore
+   ```
+
+   It parses the URL, category, and location out of that one line (best-effort slot-filling, not a full NLU pass), acknowledges immediately, runs the full three-check pipeline in a background thread, then replies in the same thread with the GEO score, the per-check breakdown, and the top fixes — followed by the full report as a PDF attachment (rendered from the HTML report with headless Chromium via Playwright, so it goes out as a real file rather than a link).
+
+2. **Real-world AI-referral logging.** Any inbound message that *isn't* an audit request gets one soft, one-line follow-up — "did an AI point you here today?" Replies are logged to `caspian_referral_log.jsonl` as a ground-truth signal on real AI referrals, distinct from and complementary to `visibility/live_test.py`'s simulated test queries.
+
+### Running GEO Pulse
+
+```bash
+pip install -r requirements.txt
+playwright install chromium        # one-time, needed for HTML → PDF rendering
+
+comm init                          # writes COMM_API_KEY / COMM_BASE_URL to .env
+echo "TELEGRAM_BOT_TOKEN=..." >> .env   # optional, from @BotFather — omit to run email-only
+
+python caspian-agent.py
+```
+
+On startup it connects an email inbox automatically and connects Telegram only if `TELEGRAM_BOT_TOKEN` is set; either way it's one handler live on every connected channel.
+
+### Design notes
+
+- **Cross-channel identity.** The "are we mid-conversation, waiting on a referral answer?" state is keyed by Caspian's `conversation_id`, not a per-channel sender id, so the flow works the same whether someone writes in on email or Telegram.
+- **Audit requests always win.** If a message looks like an audit request, it's handled as one even if the agent was mid-way through asking a referral follow-up — a real request never gets swallowed by a stale prompt.
+- **PDF delivery.** Reports render to PDF with headless Chromium (Playwright), not WeasyPrint or xhtml2pdf, because the report template (`report/generator.py`) uses CSS flexbox/grid/variables that those libraries don't render correctly. On Telegram the PDF is sent directly via the Bot API (`sendDocument`) to sidestep the gateway's base64 payload limits; on email and other channels it goes through Caspian's native `media` attachment.
+- **Failure handling.** If the audit pipeline throws, the agent replies with the error and a nudge toward the expected format instead of leaving the thread hanging.
 
 ---
 
@@ -58,7 +103,8 @@ If `GROQ_API_KEY` is missing, the Llama 3 visibility test and competitor extract
 
 ```
 geo_auditor/
-├── main.py                   # Entry point + score computation
+├── main.py                   # CLI entry point + score computation
+├── caspian-agent.py           # GEO Pulse — Caspian agent (email + Telegram) wrapping run_audit
 ├── requirements.txt
 ├── .env.example
 ├── checks/
@@ -72,8 +118,10 @@ geo_auditor/
 │   ├── entity_salience.py    # Pydantic schema for salience check output
 │   ├── quotability.py        # Pydantic schema for quotability check output
 │   └── concept_coverage.py   # Pydantic schema for concept coverage output
-└── report/
-    └── generator.py          # Jinja2 HTML report template
+├── report/
+│   └── generator.py          # Jinja2 HTML report template (also rendered to PDF by GEO Pulse)
+├── reports/                   # GEO Pulse output — HTML + PDF reports per audit (gitignored)
+└── caspian_referral_log.jsonl # GEO Pulse output — real-world AI-referral answers (gitignored)
 ```
 
 ### The `llm_utils` design
@@ -171,6 +219,9 @@ Once a business enters the citation pool, _absorption_ determines whether AI use
 | Live visibility — Gemini                      | **Real**                                         | Gemini + Google Search grounding                      |
 | Live visibility — Llama 3 (training data)     | **Real if GROQ_API_KEY set, else skipped**       | Groq / Llama 3.3 (no web search — tests model memory) |
 | Live visibility — Perplexity                  | **Real if PERPLEXITY_API_KEY set, else skipped** | Perplexity API                                        |
+| GEO Pulse — email + Telegram audit requests   | **Real**                                         | Caspian SDK (`CommClient`), same `run_audit` pipeline as the CLI |
+| GEO Pulse — PDF report delivery               | **Real**                                         | Headless Chromium via Playwright, sent natively (Telegram Bot API `sendDocument` / Caspian `media` attachment) |
+| GEO Pulse — AI-referral logging               | **Real**                                         | Keyword match on inbound replies, written to `caspian_referral_log.jsonl` |
 
 Any unavailable check is labeled explicitly in the report — the word "Unable to compute" with the reason, never a confident-looking finding built on no evidence.
 
@@ -182,9 +233,9 @@ Any unavailable check is labeled explicitly in the report — the word "Unable t
 
 **No Perplexity as a required dependency** — requires paid credits. It's supported as an optional platform if the key is present, labeled as unavailable otherwise. Zhang Kai et al. show Perplexity cites the broadest source set (16.35 avg citations/prompt), which makes it useful for visibility testing, but the audit's core checks don't depend on it.
 
-**No auth / billing / accounts** — single-session tool. No state to persist.
+**No auth / billing / accounts** — single-session tool. No state to persist beyond GEO Pulse's in-memory "awaiting a referral answer?" flag per conversation, which isn't durable across restarts by design.
 
-**No database** — results write to HTML + JSON locally.
+**No database** — results write to HTML + JSON locally; GEO Pulse writes reports to `reports/` and referral answers to `caspian_referral_log.jsonl`, both flat files, no DB.
 
 **No Docker / CI / tests** — out of scope per the brief.
 
@@ -198,7 +249,7 @@ Any unavailable check is labeled explicitly in the report — the word "Unable t
 
 ## What I'd build next (with another week)
 
-1. **Longitudinal tracking** — repeat the same audit weekly, show visibility trend over time. Zhang Kai et al. explicitly note a one-time snapshot is incomplete; model behavior changes.
+1. **Longitudinal tracking** — repeat the same audit weekly, show visibility trend over time. Zhang Kai et al. explicitly note a one-time snapshot is incomplete; model behavior changes. GEO Pulse's referral log is a first step here (real referrals accumulating over time), but there's no scheduled re-audit or trend view yet.
 2. **Competitor benchmarking** — run the audit on 3 competitors side by side. The most powerful product moment is showing the owner exactly which competitor "owns" their topic in AI answers and why.
 3. **Platform-specific reports** — ChatGPT and Google AIO show different absorption signals (ChatGPT: LLM relevance; Google: embedding similarity; Perplexity: heading count + length). The research supports platform-specific optimization advice, not one universal recipe.
 4. **`llms.txt` auto-generator** — 5-question interview with the founder, outputs a complete, accurate `llms.txt` ready to publish.
